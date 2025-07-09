@@ -297,6 +297,12 @@ fork(void)
 
   release(&np->lock);
 
+  // 复制进程状态
+  np->state = RUNNABLE;
+  
+  // 复制跟踪掩码
+  np->trace_mask = p->trace_mask;
+
   return pid;
 }
 
