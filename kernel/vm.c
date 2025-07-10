@@ -6,6 +6,10 @@
 #include "defs.h"
 #include "fs.h"
 
+// 计数变量
+int copyin_count = 0;
+int copyinstr_count = 0;
+
 /*
  * the kernel's page table.
  */
@@ -381,6 +385,8 @@ copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
 
+  copyin_count++;  // 计数
+
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
@@ -408,6 +414,8 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   uint64 n, va0, pa0;
   int got_null = 0;
 
+  copyinstr_count++;  // 计数
+  
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
@@ -438,5 +446,37 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return 0;
   } else {
     return -1;
+  }
+}
+
+// 打印页表内容
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", pagetable);
+  vmprint_rec(pagetable, 0);
+}
+
+// 递归打印页表
+void
+vmprint_rec(pagetable_t pagetable, int level)
+{
+  // 遍历页表的每一项
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+    // 如果页表项有效
+    if(pte & PTE_V){
+      // 打印缩进
+      for(int j = 0; j < level; j++)
+        printf(".. ");
+      printf("..%d: pte %p pa %p\n", i, pte, PTE2PA(pte));
+      
+      // 如果这是一个指向下一级页表的PTE
+      if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+        // 递归打印下一级页表
+        uint64 child = PTE2PA(pte);
+        vmprint_rec((pagetable_t)child, level + 1);
+      }
+    }
   }
 }

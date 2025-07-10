@@ -5,6 +5,9 @@
 #include "spinlock.h"
 #include "proc.h"
 
+extern int copyin_count;
+extern int copyinstr_count;
+
 //
 // This file contains copyin_new() and copyinstr_new(), the
 // replacements for copyin and coyinstr in vm.c.
@@ -18,8 +21,8 @@ static struct stats {
 int
 statscopyin(char *buf, int sz) {
   int n;
-  n = snprintf(buf, sz, "copyin: %d\n", stats.ncopyin);
-  n += snprintf(buf+n, sz, "copyinstr: %d\n", stats.ncopyinstr);
+  n = snprintf(buf, sz, "copyin: %d\n", copyin_count);
+  n += snprintf(buf+n, sz-n, "copyinstr: %d\n", copyinstr_count);
   return n;
 }
 
