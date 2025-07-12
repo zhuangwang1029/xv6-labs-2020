@@ -34,14 +34,14 @@ procinit(void)
       // Allocate a page for the process's kernel stack.
       // Map it high in memory, followed by an invalid
       // guard page.
-      char *pa = kalloc();
+      /*char *pa = kalloc();
       if(pa == 0)
         panic("kalloc");
       uint64 va = KSTACK((int) (p - proc));
       kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-      p->kstack = va;
+      p->kstack = va;*/
   }
-  kvminithart();
+  // kvminithart();
 }
 
 // Must be called with interrupts disabled,
@@ -113,6 +113,16 @@ found:
     return 0;
   }
 
+  // 创建进程的内核页表，并分配内核栈
+  p->kernelPageTable = kvmmake();
+  char *pa = kalloc();
+  if(pa == 0)
+    panic("kalloc");
+  
+  uint64 va = TRAMPOLINE - 2 * PGSIZE;
+  mappages(p->kernelPageTable, va, PGSIZE, (uint64)pa, PTE_R | PTE_W);
+  p->kstack = va;
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,6 +149,9 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+  if(p->kernelPageTable)
+    proc_free_kernel_pagetable(p->kstack,p->kernelPageTable);
+  p->kernelPageTable = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
@@ -473,8 +486,11 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+        w_satp(MAKE_SATP(p->kernelPageTable));
+        sfence_vma();
         swtch(&c->context, &p->context);
 
+        kvminithart();
         // Process is done running for now.
         // It should have changed its p->state before coming back.
         c->proc = 0;

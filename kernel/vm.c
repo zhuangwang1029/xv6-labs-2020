@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 // 计数变量
 int copyin_count = 0;
@@ -23,32 +25,11 @@ extern char trampoline[]; // trampoline.S
  * create a direct-map page table for the kernel.
  */
 void
-kvminit()
+kvminit(void)
 {
-  kernel_pagetable = (pagetable_t) kalloc();
-  memset(kernel_pagetable, 0, PGSIZE);
-
-  // uart registers
-  kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
-
-  // virtio mmio disk interface
-  kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
-
-  // CLINT
-  kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
-
-  // PLIC
-  kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
-
-  // map kernel text executable and read-only.
-  kvmmap(KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
-
-  // map kernel data and the physical RAM we'll make use of.
-  kvmmap((uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
-
-  // map the trampoline for trap entry/exit to
-  // the highest virtual address in the kernel.
-  kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  kernel_pagetable = kvmmake();
+  // 单独添加 CLINT 映射
+  mappages(kernel_pagetable, CLINT, 0x10000, CLINT, PTE_R | PTE_W);
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -136,7 +117,7 @@ kvmpa(uint64 va)
   pte_t *pte;
   uint64 pa;
   
-  pte = walk(kernel_pagetable, va, 0);
+  pte = walk(myproc()->kernelPageTable, va, 0);
   if(pte == 0)
     panic("kvmpa");
   if((*pte & PTE_V) == 0)
@@ -184,10 +165,15 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     panic("uvmunmap: not aligned");
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
-    if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
-    if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+    pte = walk(pagetable, a, 0);
+    if(pte == 0) {
+      // 如果页表项不存在，跳过而不是panic
+      continue;  // 跳过未映射的页面
+    }
+    if((*pte & PTE_V) == 0) {
+      // 如果页面无效，也跳过
+      continue;
+    }
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -287,7 +273,7 @@ freewalk(pagetable_t pagetable)
       freewalk((pagetable_t)child);
       pagetable[i] = 0;
     } else if(pte & PTE_V){
-      panic("freewalk: leaf");
+      pagetable[i] = 0;
     }
   }
   kfree((void*)pagetable);
@@ -479,4 +465,59 @@ vmprint_rec(pagetable_t pagetable, int level)
       }
     }
   }
+}
+
+pagetable_t
+kvmmake(void)
+{
+  pagetable_t kernel_pagetable = (pagetable_t) kalloc();
+  memset(kernel_pagetable, 0, PGSIZE);
+
+  // uart registers
+  mappages(kernel_pagetable, UART0, PGSIZE, UART0, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  mappages(kernel_pagetable, VIRTIO0, PGSIZE, VIRTIO0, PTE_R | PTE_W);
+
+  // CLINT会在kvminit函数中映射
+
+  // PLIC
+  mappages(kernel_pagetable, PLIC, 0x400000, PLIC, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  mappages(kernel_pagetable, KERNBASE, (uint64)etext-KERNBASE, KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  mappages(kernel_pagetable, (uint64)etext, PHYSTOP-(uint64)etext, (uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit
+  mappages(kernel_pagetable, TRAMPOLINE, PGSIZE, (uint64)trampoline, PTE_R | PTE_X);
+
+  return kernel_pagetable;
+}
+
+// 释放用户页表并释放相关的物理内存页
+void
+uvmfree2(pagetable_t pagetable, uint64 va, uint npages)
+{
+  if(npages > 0)
+    uvmunmap(pagetable, va, npages, 1);  // do_free = 1表示释放物理页面
+  freewalk(pagetable);
+}
+
+// 释放进程的内核栈和内核页表
+void
+proc_free_kernel_pagetable(uint64 kstack, pagetable_t pagetable)
+{
+  // 释放映射
+  uvmunmap(pagetable, UART0, 1, 0);
+  uvmunmap(pagetable, VIRTIO0, 1, 0);
+  uvmunmap(pagetable, CLINT, 0x10000/PGSIZE, 0);
+  uvmunmap(pagetable, PLIC, 0x400000/PGSIZE, 0);
+  uvmunmap(pagetable, KERNBASE, ((uint64)etext-KERNBASE)/PGSIZE, 0);
+  uvmunmap(pagetable, (uint64)etext, (PHYSTOP-(uint64)etext)/PGSIZE, 0);
+  uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+  
+  // 释放内核栈
+  uvmfree2(pagetable, kstack, 1);
 }
