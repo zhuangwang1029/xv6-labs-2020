@@ -13,11 +13,6 @@ extern int copyinstr_count;
 // replacements for copyin and coyinstr in vm.c.
 //
 
-static struct stats {
-  int ncopyin;
-  int ncopyinstr;
-} stats;
-
 int
 statscopyin(char *buf, int sz) {
   int n;
@@ -37,7 +32,8 @@ copyin_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
   if (srcva >= p->sz || srcva+len >= p->sz || srcva+len < srcva)
     return -1;
   memmove((void *) dst, (void *)srcva, len);
-  stats.ncopyin++;   // XXX lock
+  // stats.ncopyin++;   // XXX lock
+  copyin_count++;       // 使用全局计数器
   return 0;
 }
 
@@ -51,7 +47,8 @@ copyinstr_new(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
   struct proc *p = myproc();
   char *s = (char *) srcva;
   
-  stats.ncopyinstr++;   // XXX lock
+  // stats.ncopyinstr++;   // XXX lock
+  copyinstr_count++;       // 使用全局计数器
   for(int i = 0; i < max && srcva + i < p->sz; i++){
     dst[i] = s[i];
     if(s[i] == '\0')

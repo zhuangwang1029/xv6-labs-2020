@@ -42,13 +42,33 @@ uint64
 sys_sbrk(void)
 {
   int addr;
-  int n;
+  int n, j;
+  struct proc *p = myproc();
+  pte_t *pte, *kernelPte;
 
   if(argint(0, &n) < 0)
     return -1;
-  addr = myproc()->sz;
+  addr = p->sz;
+  if(addr + n >= PLIC){
+    return -1;
+  }
   if(growproc(n) < 0)
     return -1;
+
+  if (n > 0){
+    // 内存增长时，创建新的映射
+    for (j = addr; j < addr + n; j += PGSIZE){
+      pte = walk(p->pagetable, j, 0);
+      kernelPte = walk(p->kernelPageTable, j, 1);
+      *kernelPte = (*pte) & ~PTE_U;
+    }
+  } else {
+    // 内存减少时，解除映射
+    for (j = addr - PGSIZE; j >= addr + n; j -= PGSIZE){
+      uvmunmap(p->kernelPageTable, j, 1, 0);
+    }
+  }
+
   return addr;
 }
 

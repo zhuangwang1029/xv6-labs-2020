@@ -150,7 +150,7 @@ freeproc(struct proc *p)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
   if(p->kernelPageTable)
-    proc_free_kernel_pagetable(p->kstack,p->kernelPageTable);
+    proc_free_kernel_pagetable(p->kstack, p->kernelPageTable, p->sz);
   p->kernelPageTable = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
@@ -225,6 +225,7 @@ void
 userinit(void)
 {
   struct proc *p;
+  pte_t *pte, *kernelPte;
 
   p = allocproc();
   initproc = p;
@@ -233,6 +234,11 @@ userinit(void)
   // and data into it.
   uvminit(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+
+  // 将进程页表的mapping复制一份到进程内核页表
+  pte = walk(p->pagetable, 0, 0);
+  kernelPte = walk(p->kernelPageTable, 0, 1);
+  *kernelPte = (*pte) & ~PTE_U;
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter
@@ -274,7 +280,8 @@ fork(void)
   int i, pid;
   struct proc *np;
   struct proc *p = myproc();
-
+  pte_t *pte, *kernelPte;
+  
   // Allocate process.
   if((np = allocproc()) == 0){
     return -1;
@@ -286,6 +293,14 @@ fork(void)
     release(&np->lock);
     return -1;
   }
+
+  // 将用户页面映射到内核页表中
+  for(i = 0; i < p->sz; i += PGSIZE){
+    pte = walk(np->pagetable, i, 0);
+    kernelPte = walk(np->kernelPageTable, i, 1);
+    *kernelPte = (*pte) & ~PTE_U;
+  }
+
   np->sz = p->sz;
 
   np->parent = p;

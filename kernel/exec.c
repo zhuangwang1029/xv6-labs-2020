@@ -51,6 +51,11 @@ exec(char *path, char **argv)
     uint64 sz1;
     if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz)) == 0)
       goto bad;
+
+    // 添加用户地址不能大于PLIC的判断
+    if (sz1 >= PLIC)
+      goto bad;
+
     sz = sz1;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
@@ -96,6 +101,17 @@ exec(char *path, char **argv)
     goto bad;
   if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
+
+  pte_t *pte, *kernelPte;
+  // 在加载新程序前，取消旧的用户页表映射
+  uvmunmap(p->kernelPageTable, 0, PGROUNDUP(oldsz)/PGSIZE, 0);
+  
+  // 创建新的用户页表到内核页表的映射
+  for(i = 0; i < sz; i += PGSIZE){
+    pte = walk(pagetable, i, 0);
+    kernelPte = walk(p->kernelPageTable, i, 1);
+    *kernelPte = (*pte) & ~PTE_U;
+  }
 
   // arguments to user main(argc, argv)
   // argc is returned via the system call return

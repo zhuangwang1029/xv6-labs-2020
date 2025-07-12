@@ -183,9 +183,13 @@ void            vmprint_rec(pagetable_t, int);
 extern int      copyin_count;
 extern int      copyinstr_count;
 pagetable_t     kvmmake(void);
-void            proc_free_kernel_pagetable(uint64, pagetable_t);
+void            proc_free_kernel_pagetable(uint64, pagetable_t, uint64);
 void            uvmfree2(pagetable_t, uint64, uint);
 void            freewalk(pagetable_t);
+
+// vmcopyin.c
+int             copyin_new(pagetable_t, char*, uint64, uint64);
+int             copyinstr_new(pagetable_t, char*, uint64, uint64);
 
 // plic.c
 void            plicinit(void);
