@@ -77,8 +77,29 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    // 处理alarm功能
+    if(p->alarm_interval > 0) {
+      p->alarm_ticks++;
+      
+      // 检查是否达到了设定的间隔且没有正在处理的alarm
+      if(p->alarm_ticks >= p->alarm_interval && !p->alarm_in_progress) {
+        // 保存当前上下文，便于后续恢复
+        p->alarm_tf = kalloc();
+        if(p->alarm_tf == 0)
+          panic("alarm_tf allocation");
+        memmove(p->alarm_tf, p->trapframe, sizeof(struct trapframe));
+        
+        // 设置trapframe以跳转到handler
+        p->trapframe->epc = p->alarm_handler;
+        
+        // 重置ticks计数并设置处理中标志
+        p->alarm_ticks = 0;
+        p->alarm_in_progress = 1;
+      }
+    }
     yield();
+  }
 
   usertrapret();
 }
