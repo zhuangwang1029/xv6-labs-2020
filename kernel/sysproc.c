@@ -62,6 +62,10 @@ sys_sleep(void)
     return -1;
   acquire(&tickslock);
   ticks0 = ticks;
+
+  // 调用backtrace函数
+  backtrace();
+  
   while(ticks - ticks0 < n){
     if(myproc()->killed){
       release(&tickslock);

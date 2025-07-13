@@ -132,3 +132,20 @@ printfinit(void)
   initlock(&pr.lock, "pr");
   pr.locking = 1;
 }
+
+void
+backtrace(void)
+{
+  uint64 fp = r_fp();
+  printf("backtrace:\n");
+  
+  // 遍历栈帧，直到到达栈的边界
+  while(fp > PGROUNDDOWN(fp) && fp < PGROUNDUP(fp)) {
+    // 返回地址存储在fp-8的位置
+    uint64 ra = *(uint64*)(fp - 8);
+    printf("%p\n", ra);
+    
+    // 上一个帧指针存储在fp-16的位置
+    fp = *(uint64*)(fp - 16);
+  }
+}
