@@ -67,6 +67,25 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if((r_scause() == 13 || r_scause() == 15)) { // 如果发生缺页中断
+    uint64 va = r_stval(); // 获取地址异常的虚拟地址值
+    uint64 pa = (uint64)kalloc(); // 分配一页物理内存，将其物理地址存入pa
+    if (pa == 0) { // 检查物理内存分配是否成功，如果失败则结束
+      p->killed = 1;
+    } else if (va >= p->sz || va <= PGROUNDDOWN(p->trapframe->sp)) {
+      // 检查虚拟地址不能超过堆实际大小，并且不能小于等于栈顶最大值
+      kfree((void*)pa);
+      p->killed = 1;
+    } else {
+      va = PGROUNDDOWN(va); // 将虚拟地址向下舍入到最近的页边界
+      memset((void*)pa, 0, PGSIZE); // 初始化分配的物理内存
+      if (mappages(p->pagetable, va, PGSIZE, pa, PTE_W | PTE_U | PTE_R) != 0) {
+        // 将虚拟地址映射到物理地址，并设置相应的页表标志
+        kfree((void*)pa);
+        p->killed = 1;
+      }
+    }
+    // lazyalloc(va);
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
