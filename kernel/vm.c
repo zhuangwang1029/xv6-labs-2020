@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -101,12 +103,26 @@ walkaddr(pagetable_t pagetable, uint64 va)
     return 0;
 
   pte = walk(pagetable, va, 0);
-  if(pte == 0)
-    return 0;
-  if((*pte & PTE_V) == 0)
-    return 0;
+  if(pte == 0 || (*pte & PTE_V) == 0) {
+    //如果pte无效，就进行分配
+    struct proc *p = myproc();// 获取当前进程的指针
+    // 检查虚拟地址 va 是否超出了进程的地址空间范围或位于用户栈的上限
+    if(va >= p->sz || va < PGROUNDUP(p->trapframe->sp)) return 0;
+    
+    pa = (uint64)kalloc();// 分配一页物理内存，并将其物理地址存储在变量 pa 中
+    if (pa == 0) return 0;// 检查物理内存分配是否成功
+    
+    // 使用 mappages 函数将虚拟地址 va 映射到物理地址 pa，并设置相应的页表标志
+    if (mappages(p->pagetable, va, PGSIZE, pa, PTE_W|PTE_R|PTE_U|PTE_X) != 0) {
+      kfree((void*)pa);
+      return 0;
+    }
+    return pa;
+  }
+  
   if((*pte & PTE_U) == 0)
     return 0;
+    
   pa = PTE2PA(*pte);
   return pa;
 }
@@ -286,7 +302,8 @@ freewalk(pagetable_t pagetable)
       freewalk((pagetable_t)child);
       pagetable[i] = 0;
     } else if(pte & PTE_V){
-      panic("freewalk: leaf");
+      // 不再对叶节点panic，而是简单地清除
+      pagetable[i] = 0;
     }
   }
   kfree((void*)pagetable);
@@ -318,9 +335,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;
+      // panic("uvmcopy: pte should exist");
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
+      // panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)

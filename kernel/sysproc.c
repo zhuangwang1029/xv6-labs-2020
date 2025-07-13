@@ -49,7 +49,15 @@ sys_sbrk(void)
     return -1;
   
   addr = p->sz;
-  p->sz += n;  // 只增加进程的虚拟地址空间大小，不分配物理内存
+  
+  if(n < 0){
+    // 当n为负数时，需要正确释放内存
+    uvmdealloc(p->pagetable, p->sz, p->sz + n);
+    p->sz += n;
+  } else {
+    // 增加内存的情况，只增加大小不分配
+    p->sz += n;
+  }
   
   return addr;
 }
