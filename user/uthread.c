@@ -15,6 +15,21 @@ struct thread {
   char       stack[STACK_SIZE]; /* the thread's stack */
   int        state;             /* FREE, RUNNING, RUNNABLE */
 
+  // 添加保存寄存器的区域
+  uint64     ra;                 /* 返回地址寄存器 */
+  uint64     sp;                 /* 栈指针寄存器 */
+  uint64     s0;                 /* 帧指针寄存器 */
+  uint64     s1;                 /* 保存寄存器 */
+  uint64     s2;                 /* 保存寄存器 */
+  uint64     s3;                 /* 保存寄存器 */
+  uint64     s4;                 /* 保存寄存器 */
+  uint64     s5;                 /* 保存寄存器 */
+  uint64     s6;                 /* 保存寄存器 */
+  uint64     s7;                 /* 保存寄存器 */
+  uint64     s8;                 /* 保存寄存器 */
+  uint64     s9;                 /* 保存寄存器 */
+  uint64     s10;                /* 保存寄存器 */
+  uint64     s11;                /* 保存寄存器 */
 };
 struct thread all_thread[MAX_THREAD];
 struct thread *current_thread;
@@ -63,6 +78,8 @@ thread_schedule(void)
      * Invoke thread_switch to switch from t to next_thread:
      * thread_switch(??, ??);
      */
+    /* 调用汇编函数进行上下文切换 */
+    thread_switch((uint64)&t->ra, (uint64)&next_thread->ra);
   } else
     next_thread = 0;
 }
@@ -77,6 +94,22 @@ thread_create(void (*func)())
   }
   t->state = RUNNABLE;
   // YOUR CODE HERE
+  // 初始化线程的栈
+  // 设置栈帧，使线程开始执行时能够调用func函数
+  // 在RISC-V中，栈是向下增长的
+  uint64 sp = (uint64)&t->stack[STACK_SIZE]; // 栈顶
+  
+  // 为ra寄存器设置返回地址为func
+  t->ra = (uint64)func;
+  
+  // 设置栈指针
+  t->sp = sp;
+  
+  // 初始化其他寄存器为0
+  t->s0 = t->s1 = t->s2 = t->s3 = t->s4 = t->s5 = 0;
+  t->s6 = t->s7 = t->s8 = t->s9 = t->s10 = t->s11 = 0;
+  
+  printf("thread_create: %p\n", t);
 }
 
 void 
