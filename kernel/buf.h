@@ -6,7 +6,7 @@ struct buf {
   struct sleeplock lock;
   uint refcnt;
   struct buf *prev; // LRU cache list
-  struct buf *next;
+  struct buf *next; // 用于桶中的链表
+  uint timestamp;   // 用于LRU替换算法
   uchar data[BSIZE];
 };
-
