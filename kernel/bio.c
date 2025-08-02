@@ -51,19 +51,19 @@ binit(void)
     initlock(&bcache.bucket[i].lock, "bcache.bucket");
     bcache.bucket[i].head = 0;  // 每个桶开始时为空
   }
-
-  // 初始化所有buffer并将它们分配到桶0中
+  // 初始化所有buffer并将它们均匀分配到各个桶中
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
     initsleeplock(&b->lock, "buffer");
     b->refcnt = 0;
-    b->timestamp = 0;
+    b->timestamp = ticks;
     b->dev = 0;
     b->blockno = 0;
     b->valid = 0;
     
-    // 将所有buffer初始分配到桶0中
-    b->next = bcache.bucket[0].head;
-    bcache.bucket[0].head = b;
+    // 将buffer均匀分配到各个桶中
+    int bucket_id = (b - bcache.buf) % NBUCKET;
+    b->next = bcache.bucket[bucket_id].head;
+    bcache.bucket[bucket_id].head = b;
   }
 }
 
@@ -90,6 +90,7 @@ bget(uint dev, uint blockno)
   for(b = bcache.bucket[bucket_id].head; b; b = b->next){
     if(b->dev == dev && b->blockno == blockno){
       b->refcnt++;
+      b->timestamp = ticks;  // 更新访问时间
       release(&bcache.bucket[bucket_id].lock);
       acquiresleep(&b->lock);
       return b;
@@ -111,15 +112,17 @@ bget(uint dev, uint blockno)
     }
   }
 
-  // 当前桶中没有可用的buffer，需要从其他桶偷取
   release(&bcache.bucket[bucket_id].lock);
 
-  // 查找最久未使用的buffer
+  // 当前桶中没有可用的buffer，需要从其他桶偷取
+  // 优化：减少锁争用，每次只锁一个桶
   struct buf *lru_buf = 0;
   int lru_bucket = -1;
-  uint oldest_time = __UINT32_MAX__;
+  uint oldest_time = -1;
 
   for(int i = 0; i < NBUCKET; i++){
+    if(i == bucket_id) continue;  // 跳过目标桶，已经检查过了
+    
     acquire(&bcache.bucket[i].lock);
     for(b = bcache.bucket[i].head; b; b = b->next){
       if(b->refcnt == 0 && b->timestamp < oldest_time){
@@ -128,6 +131,37 @@ bget(uint dev, uint blockno)
         lru_bucket = i;
       }
     }
+    
+    // 如果在当前桶找到了可用的buffer，立即使用，不继续搜索
+    if(lru_buf && lru_bucket == i){
+      // 从旧桶的链表中移除
+      if(bcache.bucket[lru_bucket].head == lru_buf){
+        bcache.bucket[lru_bucket].head = lru_buf->next;
+      } else {
+        for(struct buf *prev = bcache.bucket[lru_bucket].head; prev; prev = prev->next){
+          if(prev->next == lru_buf){
+            prev->next = lru_buf->next;
+            break;
+          }
+        }
+      }
+      release(&bcache.bucket[i].lock);
+      
+      // 将buffer添加到目标桶中
+      acquire(&bcache.bucket[bucket_id].lock);
+      lru_buf->dev = dev;
+      lru_buf->blockno = blockno;
+      lru_buf->valid = 0;
+      lru_buf->refcnt = 1;
+      lru_buf->timestamp = ticks;
+      lru_buf->next = bcache.bucket[bucket_id].head;
+      bcache.bucket[bucket_id].head = lru_buf;
+      release(&bcache.bucket[bucket_id].lock);
+      
+      acquiresleep(&lru_buf->lock);
+      return lru_buf;
+    }
+    
     release(&bcache.bucket[i].lock);
   }
 
@@ -135,28 +169,10 @@ bget(uint dev, uint blockno)
     panic("bget: no buffers");
   }
 
-  // 特殊情况：如果LRU buffer就在目标桶中，直接使用
-  if(lru_bucket == bucket_id) {
-    acquire(&bcache.bucket[bucket_id].lock);
-    // 再次检查buffer是否仍然可用
-    if(lru_buf->refcnt != 0){
-      release(&bcache.bucket[bucket_id].lock);
-      return bget(dev, blockno);  // 递归重试
-    }
-    lru_buf->dev = dev;
-    lru_buf->blockno = blockno;
-    lru_buf->valid = 0;
-    lru_buf->refcnt = 1;
-    lru_buf->timestamp = ticks;
-    release(&bcache.bucket[bucket_id].lock);
-    acquiresleep(&lru_buf->lock);
-    return lru_buf;
-  }
-
-  // 从旧桶中移除buffer
+  // 处理找到的LRU buffer（如果没有在上面的循环中处理）
   acquire(&bcache.bucket[lru_bucket].lock);
   
-  // 再次检查buffer是否仍然可用（避免竞争条件）
+  // 再次检查buffer是否仍然可用
   if(lru_buf->refcnt != 0){
     release(&bcache.bucket[lru_bucket].lock);
     return bget(dev, blockno);  // 递归重试
@@ -166,7 +182,6 @@ bget(uint dev, uint blockno)
   if(bcache.bucket[lru_bucket].head == lru_buf){
     bcache.bucket[lru_bucket].head = lru_buf->next;
   } else {
-    // 找到前一个节点
     for(b = bcache.bucket[lru_bucket].head; b; b = b->next){
       if(b->next == lru_buf){
         b->next = lru_buf->next;
@@ -174,7 +189,6 @@ bget(uint dev, uint blockno)
       }
     }
   }
-  
   release(&bcache.bucket[lru_bucket].lock);
 
   // 将buffer添加到新桶中
