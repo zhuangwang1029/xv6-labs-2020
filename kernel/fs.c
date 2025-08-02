@@ -381,7 +381,6 @@ bmap(struct inode *ip, uint bn)
   struct buf *bp;
 
   if(bn < NDIRECT){
-    // 直接块：0-10
     if((addr = ip->addrs[bn]) == 0)
       ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
@@ -389,8 +388,6 @@ bmap(struct inode *ip, uint bn)
   bn -= NDIRECT;
 
   if(bn < NINDIRECT){
-    // 间接块：11-266 (256个块)
-    // Load indirect block, allocating if necessary.
     if((addr = ip->addrs[NDIRECT]) == 0)
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
     bp = bread(ip->dev, addr);
@@ -404,37 +401,34 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NINDIRECT;
 
-  if(bn < NDINDIRECT){
-    // 双重间接块：267-65802 (256*256个块)
-    // Load doubly-indirect block, allocating if necessary.
-    if((addr = ip->addrs[NDIRECT + 1]) == 0)
-      ip->addrs[NDIRECT + 1] = addr = balloc(ip->dev);
-    
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
-    
-    // 计算在双重间接块中的索引
-    uint indirect_idx = bn / NINDIRECT;  // 第几个间接块 (0-255)
-    uint direct_idx = bn % NINDIRECT;    // 在间接块中的索引 (0-255)
-    
-    if((addr = a[indirect_idx]) == 0){
-      a[indirect_idx] = addr = balloc(ip->dev);
-      log_write(bp);
-    }
-    brelse(bp);
-    
-    // 现在访问间接块
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
-    if((addr = a[direct_idx]) == 0){
-      a[direct_idx] = addr = balloc(ip->dev);
-      log_write(bp);
-    }
-    brelse(bp);
-    return addr;
+  // 双重间接块范围检查
+  if(bn >= NINDIRECT * NINDIRECT) {
+    panic("bmap: out of range");
   }
 
-  panic("bmap: out of range");
+  // 双重间接块
+  if((addr = ip->addrs[NDIRECT + 1]) == 0)
+    ip->addrs[NDIRECT + 1] = addr = balloc(ip->dev);
+
+  uint indirect_idx = bn / NINDIRECT;
+  uint direct_idx = bn % NINDIRECT;
+
+  bp = bread(ip->dev, addr);
+  a = (uint*)bp->data;
+  if((addr = a[indirect_idx]) == 0){
+    a[indirect_idx] = addr = balloc(ip->dev);
+    log_write(bp);
+  }
+  brelse(bp);
+
+  bp = bread(ip->dev, addr);
+  a = (uint*)bp->data;
+  if((addr = a[direct_idx]) == 0){
+    a[direct_idx] = addr = balloc(ip->dev);
+    log_write(bp);
+  }
+  brelse(bp);
+  return addr;
 }
 
 // Truncate inode (discard contents).
@@ -566,11 +560,7 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
   if(off > ip->size)
     ip->size = off;
 
-  // write the i-node back to disk even if the size didn't change
-  // because the loop above might have called bmap() and added a new
-  // block to ip->addrs[].
   iupdate(ip);
-
   return tot;
 }
 
