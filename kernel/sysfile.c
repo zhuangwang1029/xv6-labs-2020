@@ -283,6 +283,43 @@ create(char *path, short type, short major, short minor)
   return ip;
 }
 
+#define MAX_SYMLINK_DEPTH 10
+
+static struct inode*
+follow_symlink(struct inode *ip)
+{
+  char target[MAXPATH];
+  struct inode *next;
+  int depth = 0;
+  
+  while(ip->type == T_SYMLINK && depth < MAX_SYMLINK_DEPTH){
+    // 读取符号链接的目标路径
+    if(readi(ip, 0, (uint64)target, 0, MAXPATH) <= 0){
+      iunlockput(ip);
+      return 0;
+    }
+    
+    iunlockput(ip);
+    
+    // 查找目标文件
+    if((next = namei(target)) == 0){
+      return 0;
+    }
+    
+    ilock(next);
+    ip = next;
+    depth++;
+  }
+  
+  if(depth >= MAX_SYMLINK_DEPTH){
+    // 检测到循环链接或链接深度过深
+    iunlockput(ip);
+    return 0;
+  }
+  
+  return ip;
+}
+
 uint64
 sys_open(void)
 {
@@ -309,6 +346,17 @@ sys_open(void)
       return -1;
     }
     ilock(ip);
+    
+    // 处理符号链接
+    if(ip->type == T_SYMLINK && !(omode & O_NOFOLLOW)){
+      // 跟踪符号链接
+      ip = follow_symlink(ip);
+      if(ip == 0){
+        end_op();
+        return -1;
+      }
+    }
+    
     if(ip->type == T_DIR && omode != O_RDONLY){
       iunlockput(ip);
       end_op();
@@ -482,5 +530,35 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+uint64
+sys_symlink(void)
+{
+  char target[MAXPATH], path[MAXPATH];
+  struct inode *ip;
+  
+  // 获取系统调用参数
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op();
+  
+  // 创建新的inode作为符号链接
+  if((ip = create(path, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  // 将目标路径写入符号链接的数据块中
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) != strlen(target)){
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip);
+  end_op();
   return 0;
 }
