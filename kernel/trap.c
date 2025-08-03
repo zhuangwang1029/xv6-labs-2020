@@ -3,8 +3,12 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -27,6 +31,65 @@ void
 trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
+}
+
+// 处理mmap相关的页面错误
+int
+handle_mmap_fault(struct proc *p, uint64 va)
+{
+  // 查找对应的VMA
+  struct vma *v = 0;
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used && va >= p->vmas[i].addr && 
+       va < p->vmas[i].addr + p->vmas[i].length){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  
+  if(v == 0)
+    return -1;  // 不是mmap区域的页面错误
+  
+  uint64 page_va = PGROUNDDOWN(va);
+  
+  // 检查页面是否已经映射
+  pte_t *pte = walk(p->pagetable, page_va, 0);
+  if(pte && (*pte & PTE_V)){
+    return 0;  // 页面已经映射
+  }
+    
+  // 分配物理页面
+  void *pa = kalloc();
+  if(pa == 0)
+    return -1;
+    
+  memset(pa, 0, PGSIZE);
+  
+  // 从文件读取数据 - 添加事务上下文
+  uint64 offset = v->offset + (page_va - v->addr);
+  
+  begin_op();  // 开始事务
+  ilock(v->f->ip);
+  int n = readi(v->f->ip, 0, (uint64)pa, offset, PGSIZE);
+  iunlock(v->f->ip);
+  end_op();    // 结束事务
+  
+  if(n < 0){
+    kfree(pa);
+    return -1;
+  }
+  // 设置页面权限
+  int perm = PTE_U;
+  if(v->prot & PROT_READ) perm |= PTE_R;
+  if(v->prot & PROT_WRITE) perm |= PTE_W;
+  if(v->prot & PROT_EXEC) perm |= PTE_X;
+  // 映射页面
+  if(mappages(p->pagetable, page_va, PGSIZE, (uint64)pa, perm) != 0){
+    kfree(pa);
+    return -1;
+  }
+  
+  return 0;
 }
 
 //
@@ -67,6 +130,14 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
+  } else if(r_scause() == 13 || r_scause() == 15){
+    // 页面错误处理
+    uint64 va = r_stval();
+    if(handle_mmap_fault(p, va) < 0){
+      printf("usertrap(): page fault %p pid=%d\n", va, p->pid);
+      printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+      p->killed = 1;
+    }
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());

@@ -5,6 +5,18 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fs.h"
+#include "file.h"
+
+// mmap常量定义
+#define PROT_NONE  0x0
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC  0x4
+
+#define MAP_SHARED    0x01
+#define MAP_PRIVATE   0x02
 
 struct cpu cpus[NCPU];
 
@@ -113,6 +125,11 @@ allocproc(void)
 
 found:
   p->pid = allocpid();
+
+  // 初始化VMA数组
+  for(int i = 0; i < NVMA; i++) {
+    p->vmas[i].used = 0;
+  }
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -296,6 +313,14 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // 复制mmap映射
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i]; // 复制VMA结构
+      filedup(p->vmas[i].f);    // 增加文件引用计数
+    }
+  }
+  
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -357,6 +382,36 @@ exit(int status)
   iput(p->cwd);
   end_op();
   p->cwd = 0;
+
+  // 清理mmap映射
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      // 写回脏页面（如果是MAP_SHARED）
+      if(p->vmas[i].flags == MAP_SHARED){
+        for(uint64 va = p->vmas[i].addr; va < p->vmas[i].addr + p->vmas[i].length; va += PGSIZE){
+          pte_t *pte = walk(p->pagetable, va, 0);
+          if(pte && (*pte & PTE_V)){
+            uint64 pa = PTE2PA(*pte);
+            uint64 file_offset = p->vmas[i].offset + (va - p->vmas[i].addr);
+            begin_op();
+            ilock(p->vmas[i].f->ip);
+            writei(p->vmas[i].f->ip, 0, pa, file_offset, PGSIZE);
+            iunlock(p->vmas[i].f->ip);
+            end_op();
+          }
+        }
+      }
+      
+      // 取消页面映射
+      uvmunmap(p->pagetable, p->vmas[i].addr, p->vmas[i].length / PGSIZE, 1);
+      
+      // 减少文件引用计数
+      fileclose(p->vmas[i].f);
+      
+      // 清除VMA
+      p->vmas[i].used = 0;
+    }
+  }
 
   // we might re-parent a child to init. we can't be precise about
   // waking up init, since we can't acquire its lock once we've

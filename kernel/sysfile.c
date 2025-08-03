@@ -16,6 +16,15 @@
 #include "file.h"
 #include "fcntl.h"
 
+// mmap常量定义
+#define PROT_NONE  0x0
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC  0x4
+
+#define MAP_SHARED    0x01
+#define MAP_PRIVATE   0x02
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -482,5 +491,173 @@ sys_pipe(void)
     fileclose(wf);
     return -1;
   }
+  return 0;
+}
+
+// 辅助函数：查找空闲的虚拟地址空间
+uint64
+find_free_va(struct proc *p, int length)
+{
+  // 从用户空间的高地址开始，避开内核区域
+  uint64 va = PGROUNDDOWN(MAXVA - 2 * PGSIZE);
+  while(va >= PGROUNDUP(length)){
+    // 检查这个区域是否与现有VMA冲突
+    int conflict = 0;
+    
+    // 检查与现有VMA的冲突
+    for(int i = 0; i < NVMA; i++){
+      if(p->vmas[i].used){
+        uint64 vma_start = p->vmas[i].addr;
+        uint64 vma_end = vma_start + p->vmas[i].length;
+        if(!(va + length <= vma_start || va >= vma_end)){
+          conflict = 1;
+          break;
+        }
+      }
+    }
+    // 检查与进程现有地址空间的冲突
+    if(!conflict && va < p->sz){
+      conflict = 1;
+    }
+    // 检查页表中是否已经有映射
+    if(!conflict){
+      for(uint64 addr = va; addr < va + length; addr += PGSIZE){
+        pte_t *pte = walk(p->pagetable, addr, 0);
+        if(pte && (*pte & PTE_V)){
+          conflict = 1;
+          break;
+        }
+      }
+    }
+    
+    if(!conflict)
+      return va;
+      
+    va -= PGSIZE;
+  }
+  return 0;  // 没有找到合适的地址
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  int length, prot, flags, fd, offset;
+  struct file *f;
+  struct proc *p = myproc();
+  
+  // 获取参数
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0 || 
+     argint(2, &prot) < 0 || argint(3, &flags) < 0 ||
+     argint(4, &fd) < 0 || argint(5, &offset) < 0)
+    return -1;
+    
+  // 检查参数有效性
+  if(addr != 0 || offset != 0 || length <= 0)
+    return -1;
+    
+  if(!(prot & (PROT_READ | PROT_WRITE)))
+    return -1;
+    
+  if(flags != MAP_SHARED && flags != MAP_PRIVATE)
+    return -1;
+    
+  // 获取文件描述符
+  if(fd < 0 || fd >= NOFILE || (f = p->ofile[fd]) == 0)
+    return -1;
+    
+  // 检查文件权限
+  if(!f->readable && (prot & PROT_READ))
+    return -1;
+  if(!f->writable && (prot & PROT_WRITE) && (flags == MAP_SHARED))
+    return -1;
+    
+  // 找到空闲的VMA槽位
+  struct vma *v = 0;
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if(v == 0)
+    return -1;  // 没有空闲的VMA槽位
+    
+  // 找到空闲的虚拟地址空间
+  uint64 va = find_free_va(p, length);
+  if(va == 0)
+    return -1;
+    
+  // 设置VMA
+  v->used = 1;
+  v->addr = va;
+  v->length = length;
+  v->prot = prot;
+  v->flags = flags;
+  v->f = filedup(f);  // 增加文件引用计数
+  v->offset = offset;
+  
+  return va;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+  struct proc *p = myproc();
+  
+  if(argaddr(0, &addr) < 0 || argint(1, &length) < 0)
+    return -1;
+    
+  if(length <= 0)
+    return -1;
+    
+  // 页面对齐
+  addr = PGROUNDDOWN(addr);
+  length = PGROUNDUP(length);
+  // 查找对应的VMA
+  struct vma *v = 0;
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used && addr >= p->vmas[i].addr && 
+       addr < p->vmas[i].addr + p->vmas[i].length){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if(v == 0)
+    return -1;  // 没有找到对应的VMA
+  
+  // 检查是否是有效的取消映射范围
+  if(addr < v->addr || addr + length > v->addr + v->length)
+    return -1;
+    
+  // 写回脏页面（如果是MAP_SHARED）
+  if(v->flags == MAP_SHARED){
+    for(uint64 va = addr; va < addr + length; va += PGSIZE){
+      pte_t *pte = walk(p->pagetable, va, 0);
+      if(pte && (*pte & PTE_V)){
+        // 页面存在，写回到文件
+        uint64 pa = PTE2PA(*pte);
+        uint64 file_offset = v->offset + (va - v->addr);
+        
+        begin_op();  // 开始事务
+        ilock(v->f->ip);
+        writei(v->f->ip, 0, pa, file_offset, PGSIZE);
+        iunlock(v->f->ip);
+        end_op();    // 结束事务
+      }
+    }
+  }
+  
+  // 取消页面映射
+  uvmunmap(p->pagetable, addr, length / PGSIZE, 1);
+  
+  // 如果取消整个VMA，清理VMA
+  if(addr == v->addr && length == v->length){
+    fileclose(v->f);
+    v->used = 0;
+  }
+  
   return 0;
 }
