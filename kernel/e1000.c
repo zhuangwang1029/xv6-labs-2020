@@ -95,26 +95,73 @@ e1000_init(uint32 *xregs)
 int
 e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
-  //
-  // the mbuf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after sending.
-  //
+  // 获取锁保护发送环
+  acquire(&e1000_lock);
   
+  // 读取当前发送队列尾指针
+  uint32 tdt = regs[E1000_TDT];
+  
+  // 检查描述符是否可用（DD位表示上次传输完成）
+  if((tx_ring[tdt].status & E1000_TXD_STAT_DD) == 0){
+    // 如果描述符不可用，释放锁并返回错误
+    release(&e1000_lock);
+    return -1;
+  }
+  
+  // 释放上次传输的mbuf（如果有的话）
+  if(tx_mbufs[tdt] != 0){
+    mbuffree(tx_mbufs[tdt]);
+  }
+  
+  // 填充描述符
+  tx_ring[tdt].addr = (uint64)m->head;                    // 数据包地址
+  tx_ring[tdt].length = m->len;                           // 数据包长度
+  tx_ring[tdt].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS; // 命令标志
+  tx_ring[tdt].status = 0;                                // 清除状态
+  
+  // 保存mbuf指针以便后续释放
+  tx_mbufs[tdt] = m;
+  
+  // 更新发送队列尾指针
+  regs[E1000_TDT] = (tdt + 1) % TX_RING_SIZE;
+  
+  release(&e1000_lock);
   return 0;
 }
 
 static void
 e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver an mbuf for each packet (using net_rx()).
-  //
+  // 处理所有等待的接收数据包
+  while(1){
+    // 计算下一个要处理的接收描述符索引
+    uint32 rdt = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+    
+    // 检查是否有新数据包（DD位表示数据包已准备好）
+    if((rx_ring[rdt].status & E1000_RXD_STAT_DD) == 0){
+      break;  // 没有新数据包，退出循环
+    }
+    
+    // 获取mbuf并更新长度
+    struct mbuf *m = rx_mbufs[rdt];
+    m->len = rx_ring[rdt].length;
+    
+    // 将数据包传递给网络协议栈
+    net_rx(m);
+    
+    // 分配新的mbuf替换已使用的
+    rx_mbufs[rdt] = mbufalloc(0);
+    if(rx_mbufs[rdt] == 0){
+      panic("e1000_recv: mbufalloc failed");
+    }
+    
+    // 设置新mbuf的地址到描述符
+    rx_ring[rdt].addr = (uint64)rx_mbufs[rdt]->head;
+    rx_ring[rdt].status = 0;  // 清除状态位
+    
+    // 更新接收队列尾指针
+    regs[E1000_RDT] = rdt;
+  }
 }
 
 void
